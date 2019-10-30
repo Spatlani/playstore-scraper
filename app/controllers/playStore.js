@@ -15,14 +15,42 @@ const groupBy = function(xs, key) {
   }, {});
 };
 
+function wait (ms) {
+  return new Promise(resolve => setTimeout(() => resolve(), ms));
+}
+
 exports.fetchNewApps = function(req, res) {
   const url = 'https://play.google.com/store/apps/top';
   puppeteer
     .launch()
     .then(browser => browser.newPage())
     .then(page => {
-      return page.goto(url).then(function() {
-        return page.content();
+      return page.goto(url, {waitUntil: 'load'}).then(async function() {
+        // Get the height of the rendered page
+        const bodyHandle = await page.$('body');
+        const { height } = await bodyHandle.boundingBox();
+        await bodyHandle.dispose();
+        console.log(height);
+        // Scroll one viewport at a time, pausing to let content load
+        const viewportHeight = page.viewport().height;
+        let viewportIncr = 0;
+        while (viewportIncr + viewportHeight < height) {
+          await page.evaluate(_viewportHeight => {
+            window.scrollBy(0, _viewportHeight);
+          }, viewportHeight);
+          await wait(20);
+          viewportIncr = viewportIncr + viewportHeight;
+        }
+
+        // Scroll back to top
+        await page.evaluate(_ => {
+          window.scrollTo(0, 0);
+        });
+
+        // Some extra delay to let images load
+        await wait(100);
+
+        return await page.content();
       });
     })
     .then(html => {
@@ -35,9 +63,8 @@ exports.fetchNewApps = function(req, res) {
             const name = $(this).find('a[href*="/store/apps/details"] > div').text();
             const storeUrl = $(this).find('a[href*="/store/apps/details"]').attr('href');
             const package = storeUrl ? storeUrl.replace('/store/apps/details?id=', '') : '';
-            const icon = $(this).find('span > span > img').attr('src');
+            const icon = $(this).find('span > span > img').attr('src') || $(this).find('span > span > img').attr('data-src');
             const developer_name = $(this).find('a[href*="/store/apps/dev"] > div').text();
-
             const match = newApps.filter((a) => {
               return a.package === package;
             });
@@ -55,14 +82,11 @@ exports.fetchNewApps = function(req, res) {
         }
       });
 
-      App.insertMany(newApps, function(err, apps) {
-        if (err) {
-          res.status(400);
-          console.log(err);
-          res.send(err.errmsg || 'Bad request.');
-        } else {
-          exports.getApps(req, res);
-        }
+      App.insertMany(newApps, {
+        ordered: false
+      }, function(err, apps) {
+        if (err) console.log(err);
+        exports.getApps(req, res);
       });
 
     })
@@ -128,6 +152,8 @@ exports.fetchSingleApp = async(function*(req, res, newApp) {
       newValues.developer_name = $('a[href*="/store/apps/dev"]').text();
       newValues.reviews = $('span[aria-label*="*ratings"]').text();
       newValues.description = $('div[itemprop="description"] > span > div').html();
+      newValues.icon = $('span > span > img').attr('src') || $('span > span > img').attr('data-src');
+
       $('button > img').each(function() {
         console.log($(this).attr('src'));
         newValues.screenshots.push($(this).attr('src'));
@@ -136,11 +162,12 @@ exports.fetchSingleApp = async(function*(req, res, newApp) {
       if (newApp) {
         newValues.category = 'Others';
         newValues.name = $('h1 > span').text();
-        newValues.icon = $('span > span > img').attr('src');
         const storeUrl = $('a[href*="/store/apps/details"]').attr('href');
         newValues.package = storeUrl ? storeUrl.replace('/store/apps/details?id=', '') : '';
 
-        App.insertMany([newValues], function(err, apps) {
+        App.insertMany([newValues], {
+          ordered: false,
+        }, function(err, apps) {
           if (err) {
             console.log(err);
             res.status(400);
